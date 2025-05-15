@@ -1,0 +1,34 @@
+# Environnement virtuel Python
+venv/
+env/
+.venv/
+.env/
+
+# Fichiers de cache Python
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+
+# Distribution / packaging
+dist/
+build/
+*.egg-info/
+
+# Fichiers de données locaux
+/data/
+/metadata/
+
+# Fichiers de configuration sensibles
+.env
+.env.local
+.env.*.local
+
+# Logs
+*.log
+logs/
+
+# Autres
+.DS_Store
+.idea/
+.vscode/
