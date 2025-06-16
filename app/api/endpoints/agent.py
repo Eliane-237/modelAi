@@ -7,6 +7,7 @@ d'agent de LexCam.
 import logging
 import time
 import asyncio
+import json
 from typing import Dict, Any, List, Optional
 from fastapi import APIRouter, HTTPException, Depends, Query, BackgroundTasks
 from fastapi.responses import StreamingResponse
@@ -104,117 +105,116 @@ async def agent_chat(
         logger.error(f"Erreur lors de l'interaction avec l'agent: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-@agent_router.get("/chat", response_model=AgentResponse)
-async def agent_chat_get(
-    query: str = Query(..., description="Requête utilisateur"),
-    session_id: Optional[int] = Query(None, description="ID de session"),
-    streaming: bool = Query(False, description="Activer le streaming"),
-    langchain_service: LangChainService = Depends(get_langchain_service_from_deps)
-):
-    """Version GET pour l'interaction avec l'agent."""
-    request = AgentRequest(
-        query=query,
-        session_id=session_id,
-        streaming=streaming
-    )
-    return await agent_chat(request, langchain_service)
+# Ajoutez cette fonction GET à votre fichier app/api/endpoints/agent.py
+# Placez-la après vos autres endpoints
 
-@agent_router.post("/chat/stream")
-async def agent_chat_stream(
-    request: AgentRequest,
+import json
+
+@agent_router.get("/chat/stream")
+async def agent_chat_stream_get(
+    query: str = Query(..., description="Requête utilisateur"),
+    session_id: Optional[str] = Query(None, description="ID de session (peut être vide)"),
+    streaming: bool = Query(True, description="Activer le streaming"),
     langchain_service: LangChainService = Depends(get_langchain_service_from_deps)
 ):
     """
-    Version streaming de l'interaction avec l'agent.
+    Version GET du streaming pour faciliter l'utilisation avec EventSource.
     Utilise Server-Sent Events pour le streaming de la réponse.
     """
     try:
         # Vérifier la requête
-        if not request.query.strip():
+        if not query.strip():
             raise HTTPException(status_code=400, detail="La requête ne peut pas être vide")
         
+        # Convertir session_id si fourni et non vide
+        parsed_session_id = None
+        if session_id and session_id.strip():
+            try:
+                parsed_session_id = int(session_id)
+            except ValueError:
+                # Si ce n'est pas un entier, on ignore
+                pass
+        
         # Charger la session si ID fourni
-        if request.session_id:
-            langchain_service.load_conversation_history(request.session_id)
-        
-        # Générer la réponse avec streaming
-        start_time = time.time()
-        result = langchain_service.generate_response(request.query, streaming=True)
-        
-        # Vérifier que le résultat est bien en streaming
-        if not result.get("streaming", False):
-            raise HTTPException(status_code=500, detail="Le mode streaming n'est pas disponible")
+        if parsed_session_id:
+            langchain_service.load_conversation_history(parsed_session_id)
         
         # Fonction générateur pour les événements SSE
-        async def streaming_generator():
+        async def stream_generator():
             try:
-                # Envoyer les métadonnées initiales
-                yield {
-                    "event": "start",
-                    "data": {
-                        "session_id": langchain_service.session_id,
-                        "query": request.query,
-                        "domains": result.get("domains", []),
-                        "intent": result.get("intent", ""),
-                        "timestamp": time.time()
-                    }
+                # Envoyer l'événement de début
+                start_time = time.time()
+                session_id_to_use = langchain_service.session_id or int(time.time())
+                
+                start_data = {
+                    "session_id": session_id_to_use,
+                    "query": query,
+                    "timestamp": time.time()
                 }
                 
-                # Suivre la réponse complète
-                full_response = ""
+                yield f"event: start\n"
+                yield f"data: {json.dumps(start_data)}\n\n"
                 
-                # Obtenir le générateur
-                generator = result["response_generator"]
+                # Générer la réponse avec streaming
+                result = langchain_service.generate_response(query, streaming=True)
                 
-                # Streaming des jetons
-                if hasattr(generator, '__iter__'):
-                    # Itérateur synchrone
-                    for token in generator:
-                        full_response += token
-                        yield {
-                            "event": "token",
-                            "data": token
-                        }
-                        await asyncio.sleep(0.01)  # Petit délai pour éviter de surcharger le client
-                elif hasattr(generator, '__aiter__'):
-                    # Itérateur asynchrone
-                    async for token in generator:
-                        full_response += token
-                        yield {
-                            "event": "token",
-                            "data": token
-                        }
+                # Vérifier si le streaming est supporté
+                if result.get("streaming", False) and "response_generator" in result:
+                    # Streaming réel depuis le LLM
+                    response_generator = result["response_generator"]
+                    
+                    for token in response_generator:
+                        yield f"event: token\n"
+                        yield f"data: {token}\n\n"
+                        # Petit délai pour éviter de surcharger le client
                         await asyncio.sleep(0.01)
                 else:
-                    # Pas un générateur valide
-                    yield {
-                        "event": "error",
-                        "data": "Format de générateur non valide"
-                    }
+                    # Fallback : simulation du streaming
+                    response_text = result.get("response", "Je n'ai pas pu générer de réponse.")
+                    words = response_text.split()
+                    
+                    for i, word in enumerate(words):
+                        token = word + (" " if i < len(words) - 1 else "")
+                        yield f"event: token\n"
+                        yield f"data: {token}\n\n"
+                        await asyncio.sleep(0.05)  # Délai pour simuler la génération
                 
-                # Envoi de l'événement de fin
-                yield {
-                    "event": "end",
-                    "data": {
-                        "session_id": langchain_service.session_id,
-                        "query": request.query,
-                        "response": full_response,
-                        "response_time": time.time() - start_time
-                    }
+                # Envoyer l'événement de fin avec les métadonnées
+                end_time = time.time()
+                end_data = {
+                    "session_id": session_id_to_use,
+                    "source_documents": result.get('source_documents', []),
+                    "domains": result.get('domains', []),
+                    "intent": result.get('intent', ''),
+                    "response_time": end_time - start_time
                 }
+                
+                yield f"event: end\n"
+                yield f"data: {json.dumps(end_data)}\n\n"
                 
             except Exception as e:
                 logger.error(f"Erreur lors du streaming: {e}")
-                yield {
-                    "event": "error",
-                    "data": str(e)
-                }
+                error_data = {"error": str(e)}
+                yield f"event: error\n"
+                yield f"data: {json.dumps(error_data)}\n\n"
         
-        return EventSourceResponse(streaming_generator())
+        # Retourner la réponse en streaming avec les bons headers
+        return StreamingResponse(
+            stream_generator(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+                "Access-Control-Allow-Origin": "*",
+                "Access-Control-Allow-Headers": "Cache-Control"
+            }
+        )
         
     except Exception as e:
         logger.error(f"Erreur lors de l'initialisation du streaming: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
 
 @agent_router.get("/sessions", response_model=SessionsResponse)
 async def list_agent_sessions(

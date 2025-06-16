@@ -1104,3 +1104,230 @@ body {
 .btn.primary i {
     margin-right: 8px;
 }
+
+/* Styles pour le streaming des réponses - LexCam */
+
+/* Message en cours de streaming */
+.message.streaming {
+    border-left: 3px solid #3b82f6;
+    background: linear-gradient(90deg, #f8fafc 0%, #e2e8f0 100%);
+    animation: pulse-border 2s ease-in-out infinite;
+}
+
+/* Animation pour le message streaming */
+@keyframes pulse-border {
+    0%, 100% {
+        border-left-color: #3b82f6;
+    }
+    50% {
+        border-left-color: #60a5fa;
+    }
+}
+
+/* Contenu du message streaming */
+.streaming-text {
+    display: inline-block;
+    line-height: 1.6;
+}
+
+/* Curseur de frappe */
+.typing-cursor {
+    display: inline-block;
+    color: #3b82f6;
+    animation: blink 1s infinite;
+    font-weight: bold;
+    margin-left: 2px;
+}
+
+@keyframes blink {
+    0%, 50% {
+        opacity: 1;
+    }
+    51%, 100% {
+        opacity: 0;
+    }
+}
+
+/* Indicateur de frappe (dots) */
+.typing-indicator {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    padding: 8px 0;
+}
+
+.typing-indicator span {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background-color: #6b7280;
+    animation: typing-dot 1.4s infinite ease-in-out;
+}
+
+.typing-indicator span:nth-child(1) {
+    animation-delay: -0.32s;
+}
+
+.typing-indicator span:nth-child(2) {
+    animation-delay: -0.16s;
+}
+
+.typing-indicator span:nth-child(3) {
+    animation-delay: 0s;
+}
+
+@keyframes typing-dot {
+    0%, 80%, 100% {
+        transform: scale(0.8);
+        opacity: 0.5;
+    }
+    40% {
+        transform: scale(1);
+        opacity: 1;
+    }
+}
+
+/* Messages avec erreur */
+.message.error {
+    background-color: #fef2f2;
+    border-left: 3px solid #ef4444;
+}
+
+.error-message {
+    color: #dc2626;
+    font-style: italic;
+    margin-top: 8px;
+    padding: 8px 12px;
+    background-color: #fee2e2;
+    border-radius: 6px;
+    border: 1px solid #fca5a5;
+}
+
+/* Bouton pendant le streaming */
+#sendQuestion:disabled {
+    background-color: #9ca3af;
+    cursor: not-allowed;
+    opacity: 0.6;
+}
+
+/* Input pendant le streaming */
+#questionInput:disabled {
+    background-color: #f9fafb;
+    color: #6b7280;
+    cursor: not-allowed;
+}
+
+/* Amélioration de la zone de chat */
+#chatMessages {
+    scroll-behavior: smooth;
+}
+
+/* Animation d'apparition des nouveaux messages */
+.message {
+    animation: fadeInUp 0.3s ease-out;
+}
+
+@keyframes fadeInUp {
+    from {
+        opacity: 0;
+        transform: translateY(20px);
+    }
+    to {
+        opacity: 1;
+        transform: translateY(0);
+    }
+}
+
+/* Styles pour les sources (si présentes) */
+.source-list {
+    margin-top: 12px;
+    padding: 12px;
+    background-color: #f8fafc;
+    border-radius: 8px;
+    border: 1px solid #e2e8f0;
+}
+
+.source-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 4px 8px;
+    margin: 2px 0;
+    background-color: white;
+    border-radius: 4px;
+    cursor: pointer;
+    transition: background-color 0.2s;
+}
+
+.source-item:hover {
+    background-color: #e2e8f0;
+}
+
+.source-item i {
+    color: #6b7280;
+}
+
+/* Informations de session */
+#sessionInfo {
+    font-size: 0.875rem;
+    color: #6b7280;
+    padding: 8px;
+    background-color: #f9fafb;
+    border-radius: 6px;
+    margin-bottom: 16px;
+}
+
+/* Indicateur de statut de connexion */
+.connection-status {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 0.875rem;
+    color: #6b7280;
+}
+
+.connection-status.connected::before {
+    content: "●";
+    color: #10b981;
+}
+
+.connection-status.disconnected::before {
+    content: "●";
+    color: #ef4444;
+}
+
+.connection-status.streaming::before {
+    content: "●";
+    color: #f59e0b;
+    animation: pulse 1s infinite;
+}
+
+@keyframes pulse {
+    0%, 100% {
+        opacity: 1;
+    }
+    50% {
+        opacity: 0.5;
+    }
+}
+
+/* Responsive design pour mobile */
+@media (max-width: 768px) {
+    .message {
+        margin: 8px 0;
+        padding: 12px;
+    }
+    
+    .typing-cursor {
+        font-size: 1.1em;
+    }
+    
+    .typing-indicator {
+        padding: 12px 0;
+    }
+    
+    .typing-indicator span {
+        width: 10px;
+        height: 10px;
+    }
+}

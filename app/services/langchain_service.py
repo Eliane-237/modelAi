@@ -18,7 +18,7 @@ from langchain.llms.base import LLM
 from langchain.agents import initialize_agent, AgentType
 from langchain_core.messages import HumanMessage, AIMessage
 from langchain.schema import BaseMemory
-from pydantic import Field
+from pydantic import Field, BaseModel
 
 # Imports pour vos services
 from app.services.embedding_service import EmbeddingService
@@ -36,9 +36,15 @@ EMBEDDING_CACHE = {}
 
 class CustomLLM(LLM):
     """Adaptateur pour LlmService compatible avec LangChain."""
-    def __init__(self, llm_service):
-        super().__init__()
-        self._llm_service = llm_service
+    
+    # Déclarer explicitement les champs
+    llm_service: Any = Field(default=None)
+    
+    def __init__(self, llm_service, **kwargs):
+        # Initialiser la classe parent d'abord
+        super().__init__(**kwargs)
+        # Puis assigner notre service
+        self.llm_service = llm_service
         logger.info("CustomLLM initialisé avec succès")
     
     @property
@@ -49,9 +55,12 @@ class CustomLLM(LLM):
     def _llm_type(self) -> str:
         return "custom_llm_service"
     
-    def _call(self, prompt: str, stop: Optional[List[str]] = None) -> str:
+    def _call(self, prompt: str, stop: Optional[List[str]] = None, **kwargs) -> str:
         try:
-            response = self._llm_service.generate_response(prompt, max_length=1000)
+            if self.llm_service is None:
+                return "Service LLM non disponible"
+                
+            response = self.llm_service.generate_response(prompt, max_length=1000)
             if isinstance(response, dict):
                 text = response.get("generated_text", response.get("response", ""))
                 if not text and "choices" in response and response["choices"]:
@@ -63,14 +72,30 @@ class CustomLLM(LLM):
             logger.error(f"Erreur lors de la génération avec LlmService: {e}")
             return "Erreur lors de la génération de la réponse."
 
-class DomainAwareMemory:
+class DomainAwareMemory(BaseModel):
     """Mémoire conversationnelle avec persistance et suivi des domaines juridiques."""
-    def __init__(self, save_dir: str, session_id: Optional[int] = None):
-        self.save_dir = save_dir
-        self.session_id = session_id or int(time.time())
-        self.messages = []
-        self.legal_contexts = {}
-        self.domains = set()
+    
+    # Déclaration des champs avec Pydantic
+    save_dir: str
+    session_id: int
+    messages: List[Dict[str, Any]] = []
+    legal_contexts: Dict[str, set] = {}
+    domains: set = set()
+    
+    class Config:
+        # Permettre les types arbitraires comme set
+        arbitrary_types_allowed = True
+    
+    def __init__(self, save_dir: str, session_id: Optional[int] = None, **kwargs):
+        session_id = session_id or int(time.time())
+        super().__init__(
+            save_dir=save_dir,
+            session_id=session_id,
+            messages=[],
+            legal_contexts={},
+            domains=set(),
+            **kwargs
+        )
         os.makedirs(save_dir, exist_ok=True)
         if session_id:
             self.load_session(session_id)
@@ -85,7 +110,9 @@ class DomainAwareMemory:
         self.messages.append({"role": "assistant", "content": message, "timestamp": time.time()})
         if legal_context:
             for domain, refs in legal_context.items():
-                self.legal_contexts.setdefault(domain, set()).update(refs)
+                if domain not in self.legal_contexts:
+                    self.legal_contexts[domain] = set()
+                self.legal_contexts[domain].update(refs)
         if domains:
             self.domains.update(domains)
         self._save_session()
@@ -186,12 +213,13 @@ class DomainAwareMemory:
 class CustomConversationMemory(BaseMemory):
     """Custom memory adapter to integrate DomainAwareMemory with LangChain."""
     
-    domain_memory: Any = Field(description="DomainAwareMemory instance")
+    domain_memory: DomainAwareMemory = Field(description="DomainAwareMemory instance")
     memory_key: str = Field(default="chat_history")
     
-    def __init__(self, domain_memory, **kwargs):
+    def __init__(self, domain_memory: DomainAwareMemory, **kwargs):
         super().__init__(domain_memory=domain_memory, **kwargs)
     
+    @property
     def memory_variables(self) -> List[str]:
         """Return the memory variables managed by this class."""
         return [self.memory_key]
@@ -355,16 +383,35 @@ class LangChainService:
 
             # Prompt système conversationnel
             system_prompt = """
-Vous êtes LexCam, un assistant juridique expert en droit camerounais. Répondez de manière formelle, précise et engageante, en vous appuyant sur les documents juridiques fournis par la base vectorielle. Intégrez des exemples locaux camerounais (ex. : pratiques à Douala, Yaoundé, ou contextes ruraux comme Bamenda) pour illustrer vos réponses.
+Vous êtes LexCam, un assistant expert sur les documents administratifs camerounais. Répondez de manière formelle, précise et engageante, en vous appuyant sur les documents juridiques fournis par la base vectorielle. Intégrez des exemples locaux camerounais (ex. : pratiques à Douala, Yaoundé, ou contextes ruraux comme Bamenda) pour illustrer vos réponses.
 
 ## Directives
-- **Précision** : Basez vos réponses sur le contexte fourni et citez les sources (ex. : "Article 42 du Code du Travail, 1992").
+
 - **Conversationnalité** : Adoptez un ton professionnel mais accessible, comme si vous expliquiez à un client camerounais.
-- **Contexte local** : Incluez des exemples pertinents (ex. : application d’une loi dans une PME à Douala).
+- **Contexte local** : Incluez des exemples pertinents (ex. : application d'une loi dans une PME à Douala).
 - **Bilinguisme** : Répondez en français, sauf si la requête est en anglais. Traduisez les termes juridiques si nécessaire.
 - **Clarification** : Si la requête est ambiguë ou le contexte insuffisant, demandez poliment des précisions.
 - **Suggestions** : Terminez par une suggestion contextuelle (ex. : "Souhaitez-vous des détails sur les sanctions associées ?").
 - **Conformité RGPD** : Les données sensibles sont anonymisées par DomainAwareMemory.
+
+COMPORTEMENT :
+- Adoptez un ton conversationnel et engageant, sans formalités inutiles, mais restez précis et professionnel.
+- Tenez compte de l’historique de la conversation. Si l’utilisateur a déjà posé une question, répondez directement sans demander “Quelle est votre question ?” et faites un lien naturel avec les échanges précédents (ex. “Vous avez parlé de la constitution tout à l’heure, voici un résumé…”).
+- Structurez vos réponses en paragraphes courts ou avec des puces pour que ce soit clair et facile à lire.
+- Adaptez vos explications et résumés au niveau de l’utilisateur : simplifiez pour les débutants, utilisez des termes techniques pour les experts, en devinant leur niveau à partir de leurs questions.
+- Basez-vous UNIQUEMENT sur les documents juridiques fournis. Citez toujours la source exacte quand tu te sers de la base vectorielle pour répondre ou une source quelconque (nom du document, article, section ou page) pour les explications et les résumés.
+- Si une information n’est pas dans les documents, dites-le honnêtement (ex. “Désolé, je n’ai pas assez d’infos dans mes sources pour résumer ce sujet, mais je peux aider avec autre chose.”).
+- Si un terme juridique est complexe, expliquez-le brièvement en langage courant pour le rendre accessible.
+- Si l’utilisateur semble inquiet ou utilise des mots comme “stressé” ou “urgent”, montrez de l’empathie (ex. “Je vois que c’est préoccupant, on va clarifier ça ensemble.”).
+- Si la question est vague, demandez une précision de manière amicale (ex. “Pour bien vous aider, vous parlez de quel aspect du droit ?”).
+- Répondez aux salutations avec un accueil chaleureux.
+
+INSTRUCTIONS SPÉCIFIQUES :
+- Pour les résumés, incluez 3 à 5 points clés maximum, en évitant les détails inutiles. Assurez-vous que le résumé est autonome mais invite à poser des questions pour approfondir.
+- Utilisez la langue de l’utilisateur (français par défaut, anglais si détecté).
+- Restez neutre et objectif, mais ajoutez une touche de chaleur pour rendre l’échange agréable.
+- Si c’est la première question de la session, accueillez l’utilisateur avec enthousiasme. Dans une conversation en cours, concentrez-vous sur la continuité et la pertinence.
+- Évitez les réponses génériques ou hors sujet. Assurez-vous que vos réponses et résumés s’appuient sur le contexte de la question et de l’historique.
 
 ## Contexte juridique
 {context}
@@ -501,6 +548,39 @@ Final Answer: [votre réponse formelle avec exemple local si pertinent]
         
         return legal_context
 
+    def debug_source_metadata(self, results: List[Dict]) -> None:
+        """
+        Méthode de debugging pour analyser les métadonnées des sources.
+        À utiliser temporairement pour comprendre la structure des données.
+        """
+        logger.info("🔍 === DEBUG DES MÉTADONNÉES SOURCES ===")
+        
+        for i, result in enumerate(results[:3]):  # Analyser les 3 premiers résultats
+            logger.info(f"📄 Résultat #{i+1}:")
+            logger.info(f"   Type: {type(result)}")
+            logger.info(f"   Clés disponibles: {list(result.keys()) if isinstance(result, dict) else 'N/A'}")
+            
+            if isinstance(result, dict):
+                # Analyser les métadonnées
+                metadata = result.get("metadata", {})
+                logger.info(f"   Métadonnées type: {type(metadata)}")
+                logger.info(f"   Métadonnées clés: {list(metadata.keys()) if isinstance(metadata, dict) else 'N/A'}")
+                
+                # Afficher les valeurs importantes
+                if isinstance(metadata, dict):
+                    for key in ["filename", "source", "document_id", "page_number", "page", "path"]:
+                        if key in metadata:
+                            logger.info(f"   {key}: {metadata[key]} (type: {type(metadata[key])})")
+                
+                # Analyser le score
+                score = result.get("score")
+                logger.info(f"   Score: {score} (type: {type(score)})")
+                
+                # Analyser le texte
+                text = result.get("text", "")
+                logger.info(f"   Texte: {len(text)} caractères")
+        
+        logger.info("🔍 === FIN DEBUG ===")
     def _format_source_documents(self, results: List[Dict]) -> List[Dict]:
         """
         Formate les documents sources pour l'interface utilisateur avec des métadonnées améliorées.
@@ -515,51 +595,87 @@ Final Answer: [votre réponse formelle avec exemple local si pertinent]
         formatted_docs = []
         
         for result in results:
-            # Extraire les métadonnées
+            # Extraire les métadonnées de différentes sources possibles
             metadata = result.get("metadata", {})
             score = result.get("score", 0.0)
             
-            # Vérifier et compléter le nom du fichier
-            filename = metadata.get("filename", "Document inconnu")
-            if filename == "Document inconnu" or not filename:
-                # Essayer d'extraire le nom de fichier depuis d'autres métadonnées
-                if "path" in metadata and metadata["path"]:
-                    filename = os.path.basename(metadata["path"])
-                elif "source" in metadata and metadata["source"]:
-                    filename = os.path.basename(metadata["source"])
-                elif "document_id" in metadata and metadata["document_id"]:
-                    # Utiliser un identifiant tronqué si rien d'autre n'est disponible
-                    doc_id = metadata["document_id"]
-                    filename = f"Document {doc_id[:8]}..."
+            # Debug : afficher les métadonnées reçues
+            logger.debug(f"📊 Métadonnées reçues: {metadata}")
             
-            # Vérifier et compléter le numéro de page
-            page_number = metadata.get("page_number", 0)
-            if not page_number:
-                # Essayer d'extraire le numéro de page d'autres métadonnées
-                if "page" in metadata:
-                    page_number = metadata["page"]
-                else:
-                    # Utiliser 1 comme valeur par défaut sensible
-                    page_number = 1
+            # Extraction robuste du nom du fichier
+            filename = "Document juridique"
             
-            # Extraire d'autres métadonnées utiles pour l'affichage
+            # Essayer plusieurs champs pour le nom du fichier
+            possible_filename_fields = [
+                "filename", "source", "file_name", "document_name", 
+                "path", "file_path", "title", "name"
+            ]
+            
+            for field in possible_filename_fields:
+                if field in metadata and metadata[field]:
+                    raw_filename = metadata[field]
+                    
+                    # Nettoyer le chemin si c'est un chemin complet
+                    if isinstance(raw_filename, str):
+                        # Enlever les chemins Unix/Windows
+                        if "/" in raw_filename:
+                            filename = raw_filename.split("/")[-1]
+                        elif "\\" in raw_filename:
+                            filename = raw_filename.split("\\")[-1]
+                        else:
+                            filename = raw_filename
+                        
+                        # Enlever les extensions inutiles
+                        if filename.endswith(('.pdf', '.PDF')):
+                            filename = filename[:-4]
+                        
+                        # Limiter la longueur
+                        if len(filename) > 50:
+                            filename = filename[:47] + "..."
+                        
+                        break
+            
+            # Si toujours pas de nom valide, utiliser l'ID du document
+            if filename == "Document juridique" and metadata.get("document_id"):
+                doc_id = metadata["document_id"]
+                filename = f"Document_{doc_id[:12]}"
+            
+            # Extraction robuste du numéro de page
+            page_number = 1
+            possible_page_fields = [
+                "page_number", "page", "page_num", "page_index", "numero_page"
+            ]
+            
+            for field in possible_page_fields:
+                if field in metadata and metadata[field]:
+                    try:
+                        page_number = int(metadata[field])
+                        break
+                    except (ValueError, TypeError):
+                        continue
+            
+            # Extraire d'autres métadonnées utiles
             section_info = {}
-            if "section_type" in metadata and metadata["section_type"]:
+            if metadata.get("section_type"):
                 section_info["type"] = metadata["section_type"]
-            if "section_number" in metadata and metadata["section_number"]:
+            if metadata.get("section_number"):
                 section_info["number"] = metadata["section_number"]
-            if "section_title" in metadata and metadata["section_title"]:
+            if metadata.get("section_title"):
                 section_info["title"] = metadata["section_title"]
             
-            # Créer un objet document formaté
+            # Créer un objet document formaté avec toutes les métadonnées
             formatted_doc = {
                 "text": result.get("text", "")[:2000],  # Limiter la longueur du texte
                 "score": score,
                 "metadata": {
                     "document_id": metadata.get("document_id", ""),
-                    "filename": filename,
-                    "page_number": page_number,
-                    "extraction_method": metadata.get("extraction_method", "")
+                    "filename": filename,  # ← NOM PROPRE GARANTI
+                    "page_number": page_number,  # ← PAGE VALIDE GARANTIE
+                    "extraction_method": metadata.get("extraction_method", ""),
+                    "chunk_id": metadata.get("chunk_id", ""),
+                    "source": metadata.get("source", ""),
+                    # Préserver les métadonnées originales pour le debug
+                    "original_metadata": metadata
                 }
             }
             
@@ -576,8 +692,12 @@ Final Answer: [votre réponse formelle avec exemple local si pertinent]
                 
             formatted_doc["source"] = source_description
             
+            # Log pour debug
+            logger.info(f"✅ Document formaté: {filename} (page {page_number})")
+            
             formatted_docs.append(formatted_doc)
         
+        logger.info(f"📚 {len(formatted_docs)} documents formatés avec succès")
         return formatted_docs
     
     def _format_messages_as_prompt(self, messages: List[Dict]) -> str:
@@ -693,27 +813,27 @@ Final Answer: [votre réponse formelle avec exemple local si pertinent]
             system_message = """Vous êtes LexCam, un assistant juridique camerounais conversationnel et précis. Répondez comme un expert juridique amical et accessible.
 
     COMPORTEMENT :
-- Si vous connaissez le nom de l’utilisateur, commencez la première interaction de la session par un message de bienvenue personnalisé (ex. “Bienvenue, Jean ! Content de vous aider aujourd’hui.”). Si le nom n’est pas disponible, utilisez un accueil chaleureux mais général (ex. “Ravi de vous aider aujourd’hui !”).
-- Si l’utilisateur mentionne un article ou une loi spécifique, citez son texte exact, puis expliquez-le en termes simples, comme si vous l’expliquiez à quelqu’un qui découvre le sujet.
-- Si l’utilisateur demande un résumé sur un sujet juridique (ex. “Résumez le droit des contrats”), fournissez un aperçu concis et clair du sujet, basé uniquement sur les documents fournis. Structurez le résumé en points clés, adaptés au niveau d’expertise de l’utilisateur, et mentionnez les sources utilisées.
+- Si vous connaissez le nom de l'utilisateur, commencez la première interaction de la session par un message de bienvenue personnalisé (ex. "Bienvenue, Jean ! Content de vous aider aujourd'hui."). Si le nom n'est pas disponible, utilisez un accueil chaleureux mais général (ex. "Ravi de vous aider aujourd'hui !").
+- Si l'utilisateur mentionne un article ou une loi spécifique, citez son texte exact, puis expliquez-le en termes simples, comme si vous l'expliquiez à quelqu'un qui découvre le sujet.
+- Si l'utilisateur demande un résumé sur un sujet juridique (ex. "Résumez le droit des contrats"), fournissez un aperçu concis et clair du sujet, basé uniquement sur les documents fournis. Structurez le résumé en points clés, adaptés au niveau d'expertise de l'utilisateur, et mentionnez les sources utilisées.
 - Adoptez un ton conversationnel et engageant, sans formalités inutiles, mais restez précis et professionnel.
-- Tenez compte de l’historique de la conversation. Si l’utilisateur a déjà posé une question, répondez directement sans demander “Quelle est votre question ?” et faites un lien naturel avec les échanges précédents (ex. “Vous avez parlé de la constitution tout à l’heure, voici un résumé…”).
+- Tenez compte de l'historique de la conversation. Si l'utilisateur a déjà posé une question, répondez directement sans demander "Quelle est votre question ?" et faites un lien naturel avec les échanges précédents (ex. "Vous avez parlé de la constitution tout à l'heure, voici un résumé…").
 - Structurez vos réponses en paragraphes courts ou avec des puces pour que ce soit clair et facile à lire.
-- Adaptez vos explications et résumés au niveau de l’utilisateur : simplifiez pour les débutants, utilisez des termes techniques pour les experts, en devinant leur niveau à partir de leurs questions.
+- Adaptez vos explications et résumés au niveau de l'utilisateur : simplifiez pour les débutants, utilisez des termes techniques pour les experts, en devinant leur niveau à partir de leurs questions.
 - Basez-vous UNIQUEMENT sur les documents juridiques fournis. Citez toujours la source exacte (nom du document, article, section ou page) pour les explications et les résumés.
-- Si une information n’est pas dans les documents, dites-le honnêtement (ex. “Désolé, je n’ai pas assez d’infos dans mes sources pour résumer ce sujet, mais je peux aider avec autre chose.”).
+- Si une information n'est pas dans les documents, dites-le honnêtement (ex. "Désolé, je n'ai pas assez d'infos dans mes sources pour résumer ce sujet, mais je peux aider avec autre chose.").
 - Si un terme juridique est complexe, expliquez-le brièvement en langage courant pour le rendre accessible.
-- Proposez 1 ou 2 questions de suivi pertinentes, mais seulement si c’est la première question de la session ou si l’utilisateur semble vouloir explorer davantage. Évitez les suggestions inutiles dans une conversation avancée.
-- Si l’utilisateur semble inquiet ou utilise des mots comme “stressé” ou “urgent”, montrez de l’empathie (ex. “Je vois que c’est préoccupant, on va clarifier ça ensemble.”).
-- Si la question est vague, demandez une précision de manière amicale (ex. “Pour bien vous aider, vous parlez de quel aspect du droit ?”).
-- Répondez aux salutations (ex. “Bonjour”, “Salut”) avec un accueil chaleureux mais unique, sans répéter leur salutation (ex. “Content de vous aider aujourd’hui !”).
+- Proposez 1 ou 2 questions de suivi pertinentes, mais seulement si c'est la première question de la session ou si l'utilisateur semble vouloir explorer davantage. Évitez les suggestions inutiles dans une conversation avancée.
+- Si l'utilisateur semble inquiet ou utilise des mots comme "stressé" ou "urgent", montrez de l'empathie (ex. "Je vois que c'est préoccupant, on va clarifier ça ensemble.").
+- Si la question est vague, demandez une précision de manière amicale (ex. "Pour bien vous aider, vous parlez de quel aspect du droit ?").
+- Répondez aux salutations (ex. "Bonjour", "Salut") avec un accueil chaleureux mais unique, sans répéter leur salutation (ex. "Content de vous aider aujourd'hui !").
 
 INSTRUCTIONS SPÉCIFIQUES :
 - Pour les résumés, incluez 3 à 5 points clés maximum, en évitant les détails inutiles. Assurez-vous que le résumé est autonome mais invite à poser des questions pour approfondir.
-- Utilisez la langue de l’utilisateur (français par défaut, anglais si détecté).
-- Restez neutre et objectif, mais ajoutez une touche de chaleur pour rendre l’échange agréable.
-- Si c’est la première question de la session, accueillez l’utilisateur avec enthousiasme. Dans une conversation en cours, concentrez-vous sur la continuité et la pertinence.
-- Évitez les réponses génériques ou hors sujet. Assurez-vous que vos réponses et résumés s’appuient sur le contexte de la question et de l’historique.
+- Utilisez la langue de l'utilisateur (français par défaut, anglais si détecté).
+- Restez neutre et objectif, mais ajoutez une touche de chaleur pour rendre l'échange agréable.
+- Si c'est la première question de la session, accueillez l'utilisateur avec enthousiasme. Dans une conversation en cours, concentrez-vous sur la continuité et la pertinence.
+- Évitez les réponses génériques ou hors sujet. Assurez-vous que vos réponses et résumés s'appuient sur le contexte de la question et de l'historique.
     """
             
             if contextual_instruction:
@@ -753,33 +873,47 @@ INSTRUCTIONS SPÉCIFIQUES :
             # Générer la réponse avec le LLM
             logger.info("Génération de la réponse avec le LLM")
             start_time = time.time()
+
+            if search_results:
+                self.debug_source_metadata(search_results)
             
             if streaming:
                 # Gérer le mode streaming si implémenté
-                logger.info("Mode streaming non implémenté, utilisation du mode standard")
-                response_text = self.llm_service.generate_response(prompt, max_length=3000)
-            else:
-                # Génération standard
-                response_text = self.llm_service.generate_response(prompt, max_length=3000)
-            
-            generation_time = time.time() - start_time
-            logger.info(f"Réponse générée en {generation_time:.2f}s")
-            
-            # Enregistrer la réponse dans l'historique
-            self.memory.add_ai_message(response_text, {}, domains)
-            
-            # Construire et retourner la réponse complète
-            return {
-                "query": query,
-                "response": response_text,
-                "source_documents": self._format_source_documents(search_results) if hasattr(self, '_format_source_documents') else [],
-                "domains": domains,
-                "intent": intent_analysis.get("intent"),
-                "language": language,
-                "session_id": session_id,
-                "processing_time": generation_time,
-                "success": True
-            }
+                logger.info("🔄 Mode streaming activé")
+                # Créer un générateur pour le streaming
+                def response_generator():
+                    try:
+                        # Appeler le LLM en mode streaming
+                        stream = self.llm_service.generate_response(
+                            prompt=prompt, 
+                            max_length=3000, 
+                            stream=True  # ← IMPORTANT: Activer le streaming
+                        )
+                        
+                        full_response = ""
+                        for token in stream:
+                            full_response += token
+                            yield token
+                        
+                        # Sauvegarder à la fin
+                        self.memory.add_ai_message(full_response, {}, domains)
+                        
+                    except Exception as e:
+                        logger.error(f"Erreur streaming: {e}")
+                        yield f"Erreur: {str(e)}"
+                
+                # Retourner avec le générateur
+                return {
+                    "query": query,
+                    "streaming": True,
+                    "response_generator": response_generator(),
+                    "source_documents": self._format_source_documents(search_results) if hasattr(self, '_format_source_documents') else [],
+                    "domains": domains,
+                    "intent": intent_analysis.get("intent"),
+                    "language": language,
+                    "session_id": session_id,
+                    "success": True
+                }
             
         except Exception as e:
             logger.error(f"Erreur lors de la génération de réponse: {e}")
@@ -829,67 +963,13 @@ INSTRUCTIONS SPÉCIFIQUES :
             "last_updated": time.time()
         }
 
-    def _build_context_from_results(self, results: List[Any], plan: Optional[Dict] = None) -> str:
-        """
-        Construit un contexte structuré à partir des résultats de recherche
-        avec une présentation améliorée des sources.
-        
-        Args:
-            results: Liste de résultats de recherche
-            plan: Plan optionnel pour la recherche
-            
-        Returns:
-            Contexte formaté pour le prompt LLM
-        """
-        context_parts = []
+    def get_or_create_session(self, session_id: int):
+        """Charge une session ou crée une nouvelle si elle n'existe pas."""
+        if not self.load_conversation_history(session_id):
+            # Créer une nouvelle session avec l'ID fourni
+            self.session_id = session_id
+            self.memory = DomainAwareMemory(self.save_dir, session_id)
 
-        if plan:
-            context_parts.append(f"## Plan de recherche\n{json.dumps(plan, indent=2)}")
-
-        context_parts.append("## Extraits pertinents")
-        
-        # Formater les documents
-        formatted_docs = self._format_source_documents(results)
-        
-        # Regrouper par document/fichier pour une meilleure organisation
-        document_groups = {}
-        for doc in formatted_docs:
-            # Utiliser le nom de fichier comme clé de groupe
-            filename = doc["metadata"]["filename"]
-            if filename not in document_groups:
-                document_groups[filename] = []
-            document_groups[filename].append(doc)
-        
-        # Ajouter les extraits de chaque document
-        for filename, docs in document_groups.items():
-            # Créer un en-tête pour ce groupe de documents
-            context_parts.append(f"### {filename}")
-            
-            # Trier par score pour avoir les plus pertinents en premier
-            docs.sort(key=lambda x: x["score"], reverse=True)
-            
-            # Ajouter chaque extrait
-            for i, doc in enumerate(docs, 1):
-                text = doc["text"]
-                page = doc["metadata"]["page_number"]
-                # Ajouter des informations de section si disponibles
-                section_info = ""
-                if "section_type" in doc["metadata"] and "section_number" in doc["metadata"]:
-                    section_info = f" - {doc['metadata']['section_type']} {doc['metadata']['section_number']}"
-                elif "section_title" in doc["metadata"]:
-                    section_info = f" - {doc['metadata']['section_title']}"
-                    
-                context_parts.append(f"[Page {page}{section_info}] {text}")
-            
-            # Séparateur entre documents
-            context_parts.append("---")
-        
-        # Ajouter l'historique de conversation si disponible
-        history = self.memory.get_conversation_history()
-        if history:
-            context_parts.append("## Historique de conversation\n" + history)
-
-        return "\n\n".join(context_parts)
 def get_langchain_service(
     embedding_service=None,
     milvus_service=None,

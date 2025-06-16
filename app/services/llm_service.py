@@ -67,154 +67,130 @@ class LlmService:
         temperature: float = 0.7,
         top_p: float = 0.9,
         top_k: int = 50,
-        stream: bool = False,  # Défini sur False par défaut
-        dynamic_timeout: bool = True,
-        max_wait_time: int = 300,  # Temps maximum d'attente (5 minutes)
+        stream: bool = False,
         **kwargs
     ) -> Union[str, Iterator[str]]:
         """
-        Génération de réponse avec gestion dynamique du timeout.
+        Génère une réponse avec support streaming véritable.
         
         Args:
-            dynamic_timeout: Active la gestion dynamique du timeout
-            max_wait_time: Temps maximum d'attente avant abandon
-            stream: Si True, retourne un générateur qui produit la réponse par morceaux
-        """
-        def make_request():
-            payload = {
-                "model": self.model_name,
-                "prompt": prompt,
-                "max_length": max_length,
-                "temperature": temperature,
-                "top_p": top_p,
-                "top_k": top_k,
-                "stream": stream,
-                **kwargs
-            }
+            prompt: Texte d'entrée
+            stream: Si True, retourne un Iterator[str] pour le streaming
             
-            try:
-                # Calcul dynamique du timeout
-                start_time = time.time()
-                
-                response = requests.post(
-                    self.server_url, 
-                    json=payload,
-                    headers={"Content-Type": "application/json"},
-                    stream=stream,
-                    timeout=None  # Pas de timeout prédéfini
-                )
-                
-                response.raise_for_status()
-                return response
-                    
-            except Exception as e:
-                logger.error(f"Erreur de requête : {e}")
-                raise
-
-        # Gestion du streaming
-        if stream:
-            try:
-                response = make_request()
-                
-                def stream_generator():
-                    for line in response.iter_lines():
-                        if line:
-                            line_text = line.decode('utf-8')
-                            # Gérer la réponse du format serveur
-                            if line_text.startswith('data: '):
-                                line_text = line_text[6:]
-                            
-                            try:
-                                # Essayer de parser comme JSON si c'est le format du serveur
-                                json_data = json.loads(line_text)
-                                if "token" in json_data:
-                                    yield json_data["token"]
-                                elif "generated_text" in json_data:
-                                    yield json_data["generated_text"]
-                                else:
-                                    yield line_text
-                            except json.JSONDecodeError:
-                                # Si ce n'est pas du JSON, renvoyer le texte brut
-                                yield line_text
-                
-                return stream_generator()
-                
-            except Exception as e:
-                logger.error(f"Erreur de streaming : {e}")
-                def error_generator():
-                    yield f"Erreur: {str(e)}"
-                return error_generator()
-        
-        # Mode non-streaming avec gestion de timeout
-        elif dynamic_timeout:
-            with ThreadPoolExecutor(max_workers=1) as executor:
-                try:
-                    future = executor.submit(make_request)
-                    response = future.result(timeout=max_wait_time)
-                    return response.json().get("generated_text", "")
-                    
-                except ConcurrentTimeoutError:
-                    logger.warning(f"Temps d'attente maximum de {max_wait_time}s dépassé")
-                    return self._fallback_response(prompt)
-                    
-                except Exception as e:
-                    logger.error(f"Erreur lors de la génération : {e}")
-                    return self._fallback_response(prompt)
-        
-        # Méthode traditionnelle sans gestion dynamique
-        else:
-            try:
-                response = make_request()
-                return response.json().get("generated_text", "")
-                
-            except Exception as e:
-                logger.error(f"Erreur de requête : {e}")
-                return self._fallback_response(prompt)
-            
-
-    def generate_streaming_response(
-        self, 
-        prompt: str, 
-        max_length: int = 500, 
-        temperature: float = 0.7,
-        top_p: float = 0.9,
-        top_k: int = 50
-    ) -> StreamingResponse:
-        """
-        Génère une réponse en streaming compatible avec FastAPI.
-        
-        Args:
-            prompt: Texte de prompt
-            max_length: Longueur maximale de la réponse
-            temperature: Contrôle de la créativité
-            top_p: Échantillonnage noyau
-            top_k: Nombre de tokens les plus probables
-        
         Returns:
-            Réponse streaming de FastAPI
+            str si stream=False, Iterator[str] si stream=True
         """
-        def generate():
-            try:
-                # Utiliser generate_response avec streaming
-                text_generator = self.generate_response(
-                    prompt=prompt,
-                    max_length=max_length,
-                    temperature=temperature,
-                    top_p=top_p,
-                    top_k=top_k,
-                    stream=True
-                )
-                
-                for chunk in text_generator:
-                    yield f"data: {chunk}\n\n"
-            except Exception as e:
-                logger.error(f"Erreur de streaming : {e}")
-                yield f"data: {str(e)}\n\n"
         
-        return StreamingResponse(generate(), media_type="text/event-stream")
-
-
-                
+        payload = {
+            "model": self.model_name,
+            "prompt": prompt,
+            "max_length": max_length,
+            "temperature": temperature,
+            "top_p": top_p,
+            "top_k": top_k,
+            "stream": stream,
+            **kwargs
+        }
+        
+        logger.info(f"Génération de la réponse avec le LLM (streaming: {stream})")
+        
+        try:
+            if stream:
+                return self._generate_streaming(payload)
+            else:
+                return self._generate_standard(payload)
+        except Exception as e:
+            logger.error(f"Erreur LLM: {e}")
+            if stream:
+                return self._fallback_streaming(prompt)
+            else:
+                return self._fallback_response(prompt)
+    
+    def _generate_streaming(self, payload: Dict[str, Any]) -> Iterator[str]:
+        """
+        Génère une réponse en streaming - Version corrigée.
+        """
+        try:
+            response = requests.post(
+                self.server_url,
+                json=payload,
+                stream=True,
+                timeout=self.timeout,
+                headers={'Accept': 'text/event-stream'}
+            )
+            response.raise_for_status()
+            
+            logger.info("🔄 Streaming démarré")
+            
+            # Traiter la réponse streaming
+            for line in response.iter_lines(decode_unicode=True):
+                if line.strip():
+                    # Gestion des différents formats de réponse streaming
+                    if line.startswith('data: '):
+                        data = line[6:]  # Enlever 'data: '
+                        if data.strip() and data != '[DONE]':
+                            try:
+                                # Essayer de parser comme JSON
+                                json_data = json.loads(data)
+                                if 'token' in json_data:
+                                    yield json_data['token']
+                                elif 'text' in json_data:
+                                    yield json_data['text']
+                                elif 'generated_text' in json_data:
+                                    yield json_data['generated_text']
+                                else:
+                                    yield data
+                            except json.JSONDecodeError:
+                                # Si ce n'est pas du JSON, c'est probablement du texte direct
+                                yield data
+                    elif line.startswith('{'):
+                        # Ligne JSON directe
+                        try:
+                            json_data = json.loads(line)
+                            if 'token' in json_data:
+                                yield json_data['token']
+                            elif 'text' in json_data:
+                                yield json_data['text']
+                        except json.JSONDecodeError:
+                            pass
+                    else:
+                        # Texte brut
+                        yield line
+            
+            logger.info("✅ Streaming terminé")
+            
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Erreur de requête streaming: {e}")
+            # Fallback vers simulation de streaming
+            yield from self._simulate_streaming(payload.get('prompt', ''))
+        except Exception as e:
+            logger.error(f"Erreur streaming: {e}")
+            yield from self._simulate_streaming(payload.get('prompt', ''))
+    
+    def _generate_standard(self, payload: Dict[str, Any]) -> str:
+        """Génère une réponse standard (non-streaming)."""
+        try:
+            response = requests.post(
+                self.server_url,
+                json=payload,
+                timeout=self.timeout
+            )
+            response.raise_for_status()
+            
+            result = response.json()
+            return result.get("generated_text", "")
+            
+        except Exception as e:
+            logger.error(f"Erreur génération standard: {e}")
+            return self._fallback_response(payload.get('prompt', ''))
+    
+    def _generate_standard(self, payload: Dict[str, Any]) -> str:
+        """Génère une réponse standard (non-streaming)."""
+        response = requests.post(self.server_url, json=payload)
+        response.raise_for_status()
+        
+        result = response.json()
+        return result.get("generated_text", "")          
 
     def _fallback_response(self, original_prompt: str) -> str:
         """
@@ -222,11 +198,11 @@ class LlmService:
         """
         fallback_responses = [
             "Je suis désolé, mais je ne peux pas générer de réponse pour le moment. Veuillez réessayer ultérieurement.",
-            "Le service de génération de réponse est temporairement indisponible.",
-            f"Contexte initial : {original_prompt[:100]}... (traitement interrompu)"
+            "Le service de génération de réponse est temporairement indisponible. Veuillez patienter quelques instants.",
+            "Une erreur technique est survenue. L'équipe technique a été notifiée."
         ]
         
-        # Sélectionner une réponse de secours
+        # Retourner une réponse de secours appropriée
         import random
         return random.choice(fallback_responses)
 
@@ -254,136 +230,31 @@ class LlmService:
         logger.info(f"LLM Request Log: {log_data}")
 
 
-    def generate_chat_response(
-        self, 
-        messages: List[Dict[str, str]], 
-        max_length: int = 500, 
-        temperature: float = 0.7,
-        top_p: float = 0.9,
-        top_k: int = 50,
-        stream: bool = False
-    ) -> Union[str, Iterator[str]]:
-        """
-        Génère une réponse dans un format de conversation.
-        
-        Args:
-            messages: Liste de messages au format [{"role": "user/assistant", "content": "message"}]
-            max_length: Longueur maximale de la réponse
-            temperature: Contrôle de la créativité
-            top_p: Échantillonnage noyau
-            top_k: Nombre de tokens les plus probables
-            stream: Activer/désactiver le streaming
-        
-        Returns:
-            Réponse générée (str ou itérateur)
-        """
-        # Convertir le format de chat en prompt unique pour la v1
-        # Dans une version future, on pourrait améliorer le support du format multi-tours
-        full_prompt = "\n".join([f"{msg['role']}: {msg['content']}" for msg in messages])
-        
-        return self.generate_response(
-            prompt=full_prompt,
-            max_length=max_length,
-            temperature=temperature,
-            top_p=top_p,
-            top_k=top_k,
-            stream=stream
-        )
-
-    def generate_with_context(
-        self, 
-        context: str, 
-        question: str, 
-        max_length: int = 500, 
-        temperature: float = 0.7,
-        top_p: float = 0.9,
-        top_k: int = 50,
-        stream: bool = False
-    ) -> Union[str, Iterator[str]]:
-        """
-        Génère une réponse basée sur un contexte et une question.
-        
-        Args:
-            context: Contexte fourni pour la génération
-            question: Question spécifique à poser sur le contexte
-            max_length: Longueur maximale de la réponse
-            temperature: Contrôle de la créativité
-            top_p: Échantillonnage noyau
-            top_k: Nombre de tokens les plus probables
-            stream: Activer/désactiver le streaming
-        
-        Returns:
-            Réponse générée (str ou itérateur)
-        """
-        # Formater le prompt avec contexte et question
-        full_prompt = f"Contexte:\n{context}\n\nQuestion: {question}\n\nRéponse:"
-        
-        return self.generate_response(
-            prompt=full_prompt,
-            max_length=max_length,
-            temperature=temperature,
-            top_p=top_p,
-            top_k=top_k,
-            stream=stream
-        )
-
-# Test rapide
-def test_llm_service():
-    try:
-        # Initialiser le service LLM
-        llm_service = LlmService(
-            model_name="llama3.2:latest",
-            server_url="http://10.100.212.118:8001/generate"  # URL de votre serveur LLM
-        )
-        
-        # Test avec une requête simple (non-streaming)
-        prompt = "Explique les principes fondamentaux de la fiscalité camerounaise en 3 points."
-        response = llm_service.generate_response(
-            prompt, 
-            max_length=300, 
-            temperature=0.5,
-            stream=False
-        )
-        
-        print("=== Réponse du LLM (Non-Streaming) ===")
-        print(response)
-        
-        # Test avec streaming
-        print("\n=== Réponse du LLM (Streaming) ===")
-        streaming_response = llm_service.generate_response(
-            prompt, 
-            max_length=300, 
-            temperature=0.5,
-            stream=True
-        )
-        
-        # Collecter les chunks de la réponse streaming
-        full_streaming_response = ""
-        for chunk in streaming_response:
-            print(chunk, end='', flush=True)
-            full_streaming_response += chunk
-        print()  # Nouvelle ligne après le streaming
-        
-        # Test avec contexte
-        context = """
-        La fiscalité camerounaise est un système complexe qui vise à générer des revenus pour l'État 
-        tout en soutenant le développement économique. Le Code Général des Impôts définit les principales 
-        obligations fiscales des entreprises et des individus.
-        """
-        question = "Quels sont les principaux types d'impôts pour les entreprises au Cameroun ?"
-        
-        context_response = llm_service.generate_with_context(
-            context, 
-            question, 
-            max_length=300,
-            stream=False
-        )
-        
-        print("\n=== Réponse basée sur Contexte ===")
-        print(context_response)
-        
-    except Exception as e:
-        print(f"Erreur lors du test : {e}")
+    # Test du streaming
+def test_streaming():
+    """Test rapide du streaming"""
+    llm_service = LlmService()
+    
+    prompt = "Expliquez brièvement le droit de la famille au Cameroun."
+    
+    print("=== Test Streaming ===")
+    print("Prompt:", prompt)
+    print("Réponse streaming:")
+    
+    # Test streaming
+    response_stream = llm_service.generate_response(
+        prompt, 
+        max_length=200, 
+        temperature=0.7, 
+        stream=True
+    )
+    
+    full_response = ""
+    for token in response_stream:
+        print(token, end='', flush=True)
+        full_response += token
+    
+    print(f"\n\nRéponse complète: {len(full_response)} caractères")
 
 if __name__ == "__main__":
-    test_llm_service()
+    test_streaming()
