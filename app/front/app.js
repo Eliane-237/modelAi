@@ -273,33 +273,24 @@ const handlers = {
             appState.eventSource.addEventListener('end', (event) => {
                 try {
                     const data = JSON.parse(event.data);
-                    console.log('🏁 Données de fin reçues:', data);
                     
                     // Finaliser le message
                     messageElement.classList.remove('streaming');
                     
                     // Ajouter les sources seulement si elles sont utilisées et pertinentes
                     if (data.source_documents && data.source_documents.length > 0) {
-                        console.log('📚 Traitement des sources:', data.source_documents);
-                        
                         // Vérifier si les sources ont été réellement utilisées
                         const hasValidSources = data.source_documents.some(source => 
                             source.metadata && 
-                            (source.metadata.score > 0.1 || !source.metadata.score) && // Score bas ou pas de score
+                            source.metadata.score && 
+                            source.metadata.score > 0.3 && // Seuil de pertinence
                             source.text && 
-                            source.text.trim().length > 20 && // Texte plus court accepté
-                            (source.metadata.filename || source.metadata.document_id || source.metadata.source)
+                            source.text.trim().length > 50 // Texte substantiel
                         );
-                        
-                        console.log('🎯 Sources valides détectées:', hasValidSources);
                         
                         if (hasValidSources) {
                             handlers.chat.addSourcesInfo(messageElement, data.source_documents);
-                        } else {
-                            console.log('⚠️ Aucune source valide trouvée, critères non remplis');
                         }
-                    } else {
-                        console.log('❌ Aucune source_documents dans la réponse');
                     }
                     
                     // Mettre à jour la session
@@ -391,48 +382,25 @@ const handlers = {
 
         // Méthodes utilitaires pour le streaming
         filterRelevantSources: (sources) => {
-            if (!sources || !Array.isArray(sources)) {
-                console.log('❌ Pas de sources ou format invalide:', sources);
-                return [];
-            }
+            if (!sources || !Array.isArray(sources)) return [];
             
-            console.log('🔍 Sources reçues:', sources);
-            
-            const filtered = sources.filter(source => {
+            return sources.filter(source => {
                 // Vérifier la pertinence de la source
                 const metadata = source.metadata || {};
                 const score = metadata.score || 0;
                 const text = source.text || '';
                 
-                console.log('📊 Analyse source:', {
-                    filename: metadata.filename,
-                    page: metadata.page_number,
-                    score: score,
-                    textLength: text.length,
-                    hasValidData: !!(metadata.filename || metadata.document_id)
-                });
-                
-                // Critères assouplis :
-                // 1. Score de similarité > 0.1 (seuil plus bas)
-                // 2. Texte substantiel (> 20 caractères, plus bas)
-                // 3. Au moins un identifiant valide
-                const isRelevant = (
-                    score > 0.1 && 
-                    text.trim().length > 20 && 
-                    (metadata.filename || metadata.document_id || metadata.source)
+                // Critères de filtrage :
+                // 1. Score de similarité > 0.3 (seuil de pertinence)
+                // 2. Texte substantiel (> 50 caractères)
+                // 3. Métadonnées valides
+                return (
+                    score > 0.3 && 
+                    text.trim().length > 50 && 
+                    metadata.filename && 
+                    metadata.document_id
                 );
-                
-                console.log(`✅ Source ${isRelevant ? 'acceptée' : 'rejetée'}:`, {
-                    score: score,
-                    textLength: text.length,
-                    hasIdentifier: !!(metadata.filename || metadata.document_id || metadata.source)
-                });
-                
-                return isRelevant;
             });
-            
-            console.log(`📚 ${filtered.length}/${sources.length} sources retenues`);
-            return filtered;
         },
 
         updateMessageContent: (contentDiv, text) => {
@@ -616,82 +584,15 @@ const handlers = {
         },
 
         addSourcesInfo: (messageElement, sources) => {
-            console.log('🔧 addSourcesInfo appelée avec:', sources);
+            if (!sources || sources.length === 0) return;
             
-            if (!sources || sources.length === 0) {
-                console.log('❌ Aucune source à afficher');
-                return;
-            }
-            
-            // Filtrer et nettoyer les sources
-            const displaySources = sources.map(source => {
+            // Filtrer les sources vraiment pertinentes pour l'affichage
+            const displaySources = sources.filter(source => {
                 const metadata = source.metadata || {};
-                
-                // Extraction intelligente et robuste du nom
-                let filename = 'Document juridique';
-                
-                // Essayer différentes propriétés pour le nom du fichier
-                if (metadata.filename) {
-                    filename = metadata.filename;
-                } else if (metadata.source) {
-                    filename = metadata.source;
-                } else if (metadata.document_name) {
-                    filename = metadata.document_name;
-                } else if (metadata.title) {
-                    filename = metadata.title;
-                } else if (metadata.document_id) {
-                    // Utiliser les 12 premiers caractères du document_id
-                    filename = `Doc_${metadata.document_id.substring(0, 8)}`;
-                } else if (source.page_content && source.page_content.length > 100) {
-                    // Extraire les premiers mots comme titre
-                    const firstWords = source.page_content.substring(0, 50).trim();
-                    filename = firstWords + '...';
-                }
-                
-                // Nettoyer le nom du fichier
-                if (filename.includes('/')) {
-                    filename = filename.split('/').pop();
-                }
-                if (filename.includes('\\')) {
-                    filename = filename.split('\\').pop();
-                }
-                
-                // Enlever les extensions multiples
-                filename = filename.replace(/\.(pdf|docx|doc|txt)$/i, '');
-                
-                // Limiter la longueur
-                if (filename.length > 35) {
-                    filename = filename.substring(0, 32) + '...';
-                }
-                
-                return {
-                    ...source,
-                    cleanedMetadata: {
-                        ...metadata,
-                        filename: filename,
-                        page: metadata.page_number || metadata.page || metadata.page_num || 1,
-                        score: metadata.score || metadata.similarity_score || 0
-                    }
-                };
-            }).filter(source => {
-                const hasText = source.text && source.text.trim().length > 10;
-                const hasValidName = source.cleanedMetadata.filename !== 'Document inconnu';
-                
-                console.log('🔍 Source:', {
-                    filename: source.cleanedMetadata.filename,
-                    hasText: hasText,
-                    hasValidName: hasValidName
-                });
-                
-                return hasText; // Ne filtrer que sur le texte, pas sur le nom
+                return metadata.filename && source.text && source.text.trim().length > 30;
             });
             
-            console.log(`📋 ${displaySources.length} sources à afficher après nettoyage`);
-            
-            if (displaySources.length === 0) {
-                console.log('❌ Aucune source valide après filtrage');
-                return;
-            }
+            if (displaySources.length === 0) return;
             
             const sourceListDiv = document.createElement('div');
             sourceListDiv.className = 'source-list';
@@ -705,64 +606,52 @@ const handlers = {
             `;
             
             const sourceHeader = document.createElement('div');
-            sourceHeader.style.cssText = "margin-bottom: 10px; font-weight: 600; color: #1e40af; display: flex; align-items: center; gap: 6px; font-size: 0.95rem;";
+            sourceHeader.style.cssText = "margin-bottom: 8px; font-weight: 600; color: #1e40af; display: flex; align-items: center; gap: 6px;";
             sourceHeader.innerHTML = '<i class="fas fa-book-open"></i> Sources consultées';
             sourceListDiv.appendChild(sourceHeader);
             
             // Container pour les sources
             const sourcesContainer = document.createElement('div');
-            sourcesContainer.style.cssText = "display: flex; flex-direction: column; gap: 8px;";
+            sourcesContainer.style.cssText = "display: flex; flex-direction: column; gap: 6px;";
             
-            // Afficher jusqu'à 3 sources
+            // Limiter à 3 sources maximum pour ne pas encombrer
             displaySources.slice(0, 3).forEach((source, index) => {
-                const metadata = source.cleanedMetadata;
-                
-                console.log(`📄 Affichage source ${index + 1}:`, {
-                    filename: metadata.filename,
-                    page: metadata.page,
-                    score: metadata.score
-                });
-                
                 const sourceItem = document.createElement('div');
                 sourceItem.className = 'source-item';
                 sourceItem.style.cssText = `
                     display: flex; 
                     align-items: center; 
-                    gap: 10px; 
-                    padding: 10px 12px; 
+                    gap: 8px; 
+                    padding: 8px 12px; 
                     background-color: white; 
                     border-radius: 6px; 
                     cursor: pointer; 
                     transition: all 0.2s ease;
                     border: 1px solid #e2e8f0;
                     font-size: 0.9rem;
-                    min-height: 50px;
                 `;
+                
+                const metadata = source.metadata || {};
+                const filename = metadata.filename || 'Document inconnu';
+                const page = metadata.page_number || '?';
+                const score = metadata.score ? `${(metadata.score * 100).toFixed(0)}%` : '';
                 
                 // Icône du document
                 const iconSpan = document.createElement('span');
                 iconSpan.innerHTML = '<i class="fas fa-file-alt"></i>';
-                iconSpan.style.cssText = "color: #6b7280; width: 18px; text-align: center; font-size: 1.1rem;";
+                iconSpan.style.cssText = "color: #6b7280; width: 16px; text-align: center;";
                 
                 // Informations du document
                 const infoSpan = document.createElement('span');
-                infoSpan.style.cssText = "flex: 1; display: flex; flex-direction: column; gap: 3px; min-width: 0;";
+                infoSpan.style.cssText = "flex: 1; display: flex; flex-direction: column; gap: 2px;";
                 
                 const nameDiv = document.createElement('div');
-                nameDiv.style.cssText = "font-weight: 500; color: #374151; font-size: 0.9rem; line-height: 1.3; word-wrap: break-word;";
-                nameDiv.textContent = metadata.filename;
+                nameDiv.style.cssText = "font-weight: 500; color: #374151;";
+                nameDiv.textContent = filename;
                 
                 const detailsDiv = document.createElement('div');
-                detailsDiv.style.cssText = "font-size: 0.8rem; color: #6b7280; display: flex; align-items: center; gap: 8px;";
-                
-                let detailsContent = `<i class="fas fa-file-text" style="width: 12px;"></i> Page ${metadata.page}`;
-                
-                if (metadata.score && metadata.score > 0) {
-                    const scorePercent = (metadata.score * 100).toFixed(0);
-                    detailsContent += ` <span style="margin-left: 4px;">•</span> <i class="fas fa-chart-line" style="width: 12px;"></i> ${scorePercent}%`;
-                }
-                
-                detailsDiv.innerHTML = detailsContent;
+                detailsDiv.style.cssText = "font-size: 0.8rem; color: #6b7280;";
+                detailsDiv.innerHTML = `Page ${page}${score ? ` • Pertinence: ${score}` : ''}`;
                 
                 infoSpan.appendChild(nameDiv);
                 infoSpan.appendChild(detailsDiv);
@@ -773,14 +662,13 @@ const handlers = {
                     background-color: #3b82f6; 
                     color: white; 
                     border-radius: 50%; 
-                    width: 24px; 
-                    height: 24px; 
+                    width: 20px; 
+                    height: 20px; 
                     display: flex; 
                     align-items: center; 
                     justify-content: center; 
-                    font-size: 0.8rem; 
+                    font-size: 0.75rem; 
                     font-weight: 600;
-                    flex-shrink: 0;
                 `;
                 badgeSpan.textContent = index + 1;
                 
@@ -792,15 +680,13 @@ const handlers = {
                 sourceItem.addEventListener('mouseenter', () => {
                     sourceItem.style.backgroundColor = '#f1f5f9';
                     sourceItem.style.borderColor = '#3b82f6';
-                    sourceItem.style.transform = 'translateX(3px)';
-                    sourceItem.style.boxShadow = '0 2px 8px rgba(59, 130, 246, 0.15)';
+                    sourceItem.style.transform = 'translateX(2px)';
                 });
                 
                 sourceItem.addEventListener('mouseleave', () => {
                     sourceItem.style.backgroundColor = 'white';
                     sourceItem.style.borderColor = '#e2e8f0';
                     sourceItem.style.transform = 'translateX(0)';
-                    sourceItem.style.boxShadow = 'none';
                 });
                 
                 sourceItem.addEventListener('click', () => handlers.chat.showSourceDetails(source));
@@ -810,18 +696,16 @@ const handlers = {
             
             sourceListDiv.appendChild(sourcesContainer);
             
-            // Ajouter une note sur le nombre total si plus de 3
+            // Ajouter une note sur le nombre total de sources si plus de 3
             if (displaySources.length > 3) {
                 const moreInfo = document.createElement('div');
                 moreInfo.style.cssText = "margin-top: 8px; font-size: 0.8rem; color: #6b7280; text-align: center; font-style: italic;";
-                moreInfo.textContent = `+${displaySources.length - 3} autre(s) source(s)`;
+                moreInfo.textContent = `... et ${displaySources.length - 3} autre(s) source(s)`;
                 sourceListDiv.appendChild(moreInfo);
             }
             
             const contentDiv = messageElement.querySelector('.message-content');
             contentDiv.appendChild(sourceListDiv);
-            
-            console.log('✅ Sources affichées avec succès');
         },
 
         showSourceDetails: (source) => {

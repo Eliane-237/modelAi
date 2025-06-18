@@ -40,3 +40,14 @@ sse-starlette==1.6.5
 fastapi>=0.104.0
 uvicorn[standard]>=0.24.0
 requests>=2.31.0
+# Nouvelles pour l'agent hybride
+undetected-chromedriver>=3.5.4
+selenium>=4.15.0
+beautifulsoup4>=4.12.2
+requests>=2.31.0
+lxml>=4.9.3
+fake-useragent>=1.4.0
+playwright>=1.40.0  # Alternative à Selenium
+httpx>=0.25.0       # Client HTTP async
+aiohttp>=3.9.0      # Alternative pour requêtes async
+

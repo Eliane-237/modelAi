@@ -1,5 +1,6 @@
 import logging
 import json
+import time
 from typing import List, Dict, Any, Optional
 from pymilvus import Collection, CollectionSchema, FieldSchema, DataType, connections, utility
 
@@ -114,6 +115,7 @@ class MilvusService:
                 FieldSchema(name="document_id", dtype=DataType.VARCHAR, max_length=100),
                 FieldSchema(name="chunk_id", dtype=DataType.VARCHAR, max_length=100),
                 FieldSchema(name="page_number", dtype=DataType.INT64),
+                FieldSchema(name="filename", dtype=DataType.VARCHAR, max_length=65535),
                 FieldSchema(name="metadata", dtype=DataType.VARCHAR, max_length=65535)
             ]
             
@@ -161,6 +163,7 @@ class MilvusService:
     def insert_documents(self, embeddings, texts=None, metadata_list=None):
         """
         Insère des embeddings dans la collection Milvus.
+        Version corrigée pour gérer le schéma avec 8 champs (id, embedding, text, document_id, chunk_id, page_number, filename, metadata).
         
         Args:
             embeddings: Liste des vecteurs d'embedding
@@ -178,52 +181,140 @@ class MilvusService:
                 logger.info("Adaptation de la dimension des embeddings...")
                 embeddings = self._adjust_embedding_dimension(embeddings)
             
-            # Préparer les données à insérer
-            data = [embeddings]
+            # Vérifier le schéma de la collection
+            schema = self.collection.schema
+            field_names = [field.name for field in schema.fields if not field.auto_id]
             
-            # Ajouter les textes si fournis
+            logger.info(f"🔍 Champs du schéma (sans auto_id): {field_names}")
+            logger.info(f"📊 Nombre de champs à remplir: {len(field_names)}")
+            
+            # Préparer les données dans l'ordre exact du schéma
+            # IMPORTANT: Ne pas inclure le champ 'id' car il est auto-généré
+            data = []
+            
+            # 1. embedding (obligatoire)
+            data.append(embeddings)
+            
+            # 2. text (obligatoire)
             if texts:
                 if len(texts) != len(embeddings):
                     raise ValueError("Le nombre de textes doit correspondre au nombre d'embeddings")
                 data.append(texts)
             else:
                 data.append([""] * len(embeddings))
-                
-            # Ajouter les métadonnées si fournies
+            
+            # 3-8. Autres champs selon le schéma avec FILENAME
             if metadata_list:
                 if len(metadata_list) != len(embeddings):
                     raise ValueError("Le nombre de métadonnées doit correspondre au nombre d'embeddings")
                 
-                # Extraire les champs de métadonnées
+                # Extraire les champs de métadonnées dans l'ordre du schéma
                 document_ids = []
                 chunk_ids = []
                 page_numbers = []
+                filenames = []  # ← NOUVEAU CHAMP
                 metadata_json = []
                 
                 for meta in metadata_list:
-                    document_ids.append(meta.get("document_id", ""))
-                    chunk_ids.append(meta.get("chunk_id", ""))
-                    page_numbers.append(meta.get("page_number", 0))
+                    # Assurer que nous avons des valeurs valides
+                    document_id = meta.get("document_id", f"doc_{int(time.time())}")
+                    chunk_id = meta.get("chunk_id", f"chunk_{int(time.time())}")
+                    page_number = meta.get("page_number", 1)
+                    
+                    # Extraction du filename avec fallbacks
+                    filename = meta.get("filename") or meta.get("source") or meta.get("file_name") or meta.get("document_name")
+                    if not filename:
+                        filename = f"Document_{document_id[:8]}"
+                    
+                    # Nettoyer le filename
+                    if isinstance(filename, str):
+                        # Enlever les chemins
+                        if "/" in filename:
+                            filename = filename.split("/")[-1]
+                        elif "\\" in filename:
+                            filename = filename.split("\\")[-1]
+                        
+                        # Limiter la longueur pour VARCHAR
+                        if len(filename) > 200:  # Sécurité pour VARCHAR
+                            filename = filename[:197] + "..."
+                    else:
+                        filename = str(filename)
+                    
+                    # Validation des types
+                    if not isinstance(document_id, str):
+                        document_id = str(document_id)
+                    if not isinstance(chunk_id, str):
+                        chunk_id = str(chunk_id)
+                    if not isinstance(page_number, int):
+                        try:
+                            page_number = int(page_number)
+                        except (ValueError, TypeError):
+                            page_number = 1
+                    
+                    document_ids.append(document_id)
+                    chunk_ids.append(chunk_id)
+                    page_numbers.append(page_number)
+                    filenames.append(filename)  # ← AJOUTER LE FILENAME
                     
                     # Convertir les métadonnées complètes en JSON
-                    metadata_json.append(json.dumps(meta))
+                    try:
+                        metadata_json.append(json.dumps(meta, ensure_ascii=False))
+                    except Exception as e:
+                        logger.warning(f"Erreur lors de la sérialisation JSON: {e}")
+                        metadata_json.append("{}")
                 
-                data.extend([document_ids, chunk_ids, page_numbers, metadata_json])
+                # Ajouter dans l'ordre du schéma : document_id, chunk_id, page_number, filename, metadata
+                data.extend([document_ids, chunk_ids, page_numbers, filenames, metadata_json])
             else:
-                # Valeurs par défaut
-                data.extend([[""] * len(embeddings), [""] * len(embeddings), [0] * len(embeddings), ["{}"] * len(embeddings)])
+                # Valeurs par défaut pour tous les champs manquants
+                default_count = len(embeddings)
+                data.extend([
+                    [f"doc_{i}_{int(time.time())}" for i in range(default_count)],  # document_id
+                    [f"chunk_{i}_{int(time.time())}" for i in range(default_count)], # chunk_id  
+                    [1] * default_count,  # page_number
+                    [f"Document_{i}" for i in range(default_count)],  # filename ← NOUVEAU
+                    ["{}"] * default_count  # metadata
+                ])
+            
+            # Vérification finale
+            expected_fields = len([f for f in schema.fields if not f.auto_id])
+            provided_fields = len(data)
+            
+            logger.info(f"✅ Vérification: {provided_fields} listes de données pour {expected_fields} champs requis")
+            
+            if provided_fields != expected_fields:
+                raise ValueError(f"Nombre de champs incorrects: fourni {provided_fields}, attendu {expected_fields}")
+            
+            # Debug: afficher les tailles et quelques exemples
+            for i, field_data in enumerate(data):
+                field_name = field_names[i] if i < len(field_names) else f"field_{i}"
+                sample = field_data[0] if field_data else "N/A"
+                logger.debug(f"  {field_name}: {len(field_data)} éléments (ex: {sample})")
             
             # Insérer les données
+            logger.info(f"🚀 Insertion de {len(embeddings)} documents...")
             insert_result = self.collection.insert(data)
-            logger.info(f"Insertion réussie: {insert_result.insert_count} enregistrements")
+            logger.info(f"✅ Insertion réussie: {insert_result.insert_count} enregistrements")
             
             # Flush pour s'assurer que les données sont persistantes
             self.collection.flush()
-            logger.info("Données persistées avec succès")
+            logger.info("💾 Données persistées avec succès")
+            
+            return insert_result
             
         except Exception as e:
-            logger.error(f"Erreur lors de l'insertion des documents: {e}")
-            raise
+            logger.error(f"❌ Erreur lors de l'insertion des documents: {e}")
+            logger.error(f"📊 Debug - Nombre d'embeddings: {len(embeddings)}")
+            logger.error(f"📊 Debug - Nombre de textes: {len(texts) if texts else 0}")
+            logger.error(f"📊 Debug - Nombre de métadonnées: {len(metadata_list) if metadata_list else 0}")
+            
+            # Debug supplémentaire pour le schéma
+            try:
+                schema = self.collection.schema
+                logger.error(f"📋 Schéma attendu: {[f.name for f in schema.fields]}")
+                logger.error(f"📊 Champs non auto-générés: {[f.name for f in schema.fields if not f.auto_id]}")
+            except:
+                pass
 
     def _adjust_embedding_dimension(self, embeddings):
         """

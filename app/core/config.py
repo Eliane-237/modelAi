@@ -17,11 +17,11 @@ class Settings(BaseSettings):
     EMBEDDING_DIM: int = 1024
     
     # Configuration du service d'embedding
-    EMBEDDING_SERVICE_URL: str = "http://192.168.50.214:8000"
+    EMBEDDING_SERVICE_URL: str = "http://10.100.212.115:8000"
     EMBEDDING_MODEL: str = "BAAI/bge-m3"  # Ajouté ce champ manquant
     
     # Configuration LLM
-    LLM_SERVICE_URL: str = "http://192.168.50.214:8001/generate"
+    LLM_SERVICE_URL: str = "http://10.100.212.115:8001/generate"
     LLM_MODEL: str = "llama3.2:latest"
     
     # Configuration OCR
